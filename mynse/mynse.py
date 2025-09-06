@@ -42,11 +42,34 @@ def mynsefetch(url, retries=5):
             time.sleep(1 + attempt)
     raise RuntimeError(f"NSE fetch failed after {retries} attempts: {url}")
 
-# --- F&O Futures parser ---
+# --- Option Chain ---
+def nse_optionchain_scrapper(symbol="NIFTY"):
+    url = f"{BASE_URL}/api/option-chain-indices?symbol={symbol}"
+    data = mynsefetch(url, referer=f"{BASE_URL}/option-chain")
+    records = data.get("records", {}).get("data", [])
+    df = pd.json_normalize(records, sep="_") if records else pd.DataFrame()
+
+    # Broadcast underlying value
+    underlying = data.get("records", {}).get("underlyingValue", None)
+    if not df.empty:
+        df['_underlying'] = underlying
+
+    # Keep expiry dates separate
+    expiry_dates = data.get("records", {}).get("expiryDates", [])
+    df.attrs['_expiryDates'] = expiry_dates  # store as DataFrame attribute
+
+    return df
+
+# --- Index Data ---
+def nse_index():
+    url = f"{BASE_URL}/api/allIndices"
+    data = mynsefetch(url, referer=f"{BASE_URL}/market-data/live-equity-market")
+    return pd.DataFrame(data.get("data", []))
+
+# --- Futures Data (F&O) ---
 def nse_fno(symbol="NIFTY"):
     url = f"{BASE_URL}/api/fno-derivatives?symbol={symbol}"
     data = mynsefetch(url)
-
     records = data.get("stocks", [])
 
     fut_rows = []
@@ -76,3 +99,46 @@ def nse_fno(symbol="NIFTY"):
         df["expiry_dt"] = pd.to_datetime(df["expiry"], format="%d-%b-%Y")
         df = df.sort_values("expiry_dt").reset_index(drop=True)
     return df
+
+# --- PCR & OI Analysis ---
+def calculate_pcr(df):
+    if df.empty or 'CE_openInterest' not in df.columns or 'PE_openInterest' not in df.columns:
+        return 0, 0
+    total_ce_oi = df['CE_openInterest'].sum()
+    total_pe_oi = df['PE_openInterest'].sum()
+    pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi != 0 else 0
+    oi_diff = total_pe_oi - total_ce_oi
+    return pcr, oi_diff
+
+def max_oi_strikes(df):
+    if df.empty:
+        return None, None, None, None
+    max_call = df.loc[df['CE_openInterest'].idxmax()]['strikePrice'] if 'CE_openInterest' in df.columns else None
+    max_put = df.loc[df['PE_openInterest'].idxmax()]['strikePrice'] if 'PE_openInterest' in df.columns else None
+    max_call_chg = df.loc[df['CE_changeinOpenInterest'].idxmax()]['strikePrice'] if 'CE_changeinOpenInterest' in df.columns else None
+    max_put_chg = df.loc[df['PE_changeinOpenInterest'].idxmax()]['strikePrice'] if 'PE_changeinOpenInterest' in df.columns else None
+    return max_call, max_put, max_call_chg, max_put_chg
+
+def nearest_expiry_df(df):
+    if df.empty or '_expiryDates' not in df.attrs:
+        return df
+    nearest_expiry = df.attrs['_expiryDates'][0]
+    return df[df['expiryDate'] == nearest_expiry]
+    
+def index_futures_snapshot(symbol="NIFTY"):
+    """
+    Returns a DataFrame of Index Futures with nearest, next, and far expiries,
+    columns: expiry, lastPrice, volume, vwap
+    """
+    df = nse_fno(symbol)
+    if df.empty:
+        return df
+
+    # Sort by expiry (already done in nse_fno)
+    # Take nearest 3 expiries
+    snapshot = df.head(3).copy()
+
+    # Keep only useful columns
+    snapshot = snapshot[["expiry", "lastPrice", "volume", "vwap"]]
+    snapshot.reset_index(drop=True, inplace=True)
+    return snapshot
