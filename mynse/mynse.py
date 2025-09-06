@@ -72,12 +72,13 @@ def nse_index():
 
 # --- Futures Data (F&O) ---
 def nse_fno(symbol="NIFTY"):
-    """
-    Fetch Futures & Options raw JSON (like nsepython.nse_fno)
-    """
     url = f"{BASE_URL}/api/fno-derivatives?symbol={symbol}"
     data = mynsefetch(url, referer=f"{BASE_URL}/market-data/live-equity-market")
-    return data  # return raw dict, not DataFrame
+
+    # mimic nsepython by wrapping under "stocks"
+    if "futures" in data:
+        return {"stocks": data["futures"]}
+    return data
 
 # --- PCR & OI Analysis ---
 def calculate_pcr(df):
