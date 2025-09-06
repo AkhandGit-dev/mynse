@@ -1,5 +1,4 @@
-!pip install --quiet pandas matplotlib requests
-%%writefile mynse.py
+# mynse.py
 import requests
 import pandas as pd
 import time
@@ -15,76 +14,90 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Connection": "keep-alive",
-    "Referer": f"{BASE_URL}/market-data/live-equity-market",
-    "Origin": BASE_URL,
 }
 
-# --- Helper to refresh cookies ---
-def refresh_cookies(referer=None):
+# --- Internal helper to refresh cookies ---
+def refresh_cookies(referer):
+    """
+    Visit homepage + referer page to set cookies
+    """
     try:
-        session.get(BASE_URL, headers=HEADERS, timeout=10)
-        if referer:
-            session.get(referer, headers=HEADERS, timeout=10)
+        session.get(BASE_URL, headers={**HEADERS, "Referer": BASE_URL}, timeout=10)
+        session.get(referer, headers={**HEADERS, "Referer": referer}, timeout=10)
         time.sleep(0.5)
     except Exception as e:
         print(f"❌ Cookie refresh failed: {e}")
 
 # --- Core fetcher ---
-def mynsefetch(url, retries=5, referer=None):
+def mynsefetch(url, referer=None, retries=5):
+    if referer is None:
+        referer = BASE_URL
+
     for attempt in range(retries):
         try:
             refresh_cookies(referer)
-            resp = session.get(url, headers=HEADERS, timeout=10)
-            if "application/json" not in resp.headers.get("Content-Type", ""):
+            resp = session.get(url, headers={**HEADERS, "Referer": referer}, timeout=10)
+            content_type = resp.headers.get("Content-Type", "")
+            if "application/json" not in content_type:
                 raise RuntimeError(f"Response not JSON (attempt {attempt+1})")
             return resp.json()
         except Exception as e:
             print(f"❌ NSE fetch failed (attempt {attempt+1}): {e}")
             time.sleep(1 + attempt)
-    raise RuntimeError(f"NSE fetch failed after {retries} attempts: {url}")
+    raise RuntimeError(f"NSE fetch failed after {retries} attempts for URL: {url}")
 
-# --- Futures & Options Data (like nsepython) ---
-def nse_fno(symbol="NIFTY"):
-    """
-    Returns dict like nsepython:
-    {'stocks': [futures/options data]}
-    """
-    url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
+# --- Option Chain ---
+def nse_optionchain_scrapper(symbol="NIFTY"):
+    url = f"{BASE_URL}/api/option-chain-indices?symbol={symbol}"
     data = mynsefetch(url, referer=f"{BASE_URL}/option-chain")
-    return {"stocks": data.get("records", {}).get("data", [])}
+    records = data.get("records", {}).get("data", [])
+    df = pd.json_normalize(records, sep="_") if records else pd.DataFrame()
 
-# --- Clean Index Futures DataFrame ---
-def index_futures_snapshot(symbol="NIFTY"):
-    data = nse_fno(symbol)
-    records = data["stocks"]
-
-    # Filter index futures only
-    fut_recs = [
-        r for r in records
-        if r.get("metadata", {}).get("instrumentType", "").lower().startswith("index futures")
-    ]
-
-    rows = []
-    for r in fut_recs:
-        md = r.get("metadata", {})
-        mkt = r.get("marketDeptOrderBook", {})
-        ti = mkt.get("tradeInfo", {})
-        oi = mkt.get("otherInfo", {})
-
-        expiry = md.get("expiryDate")
-        last_price = md.get("lastPrice") or oi.get("lastPrice") or oi.get("ltp")
-        volume = ti.get("tradedVolume") or ti.get("totalTradedVolume") or oi.get("totalTradedVolume")
-        vwap = ti.get("vmap") or ti.get("vwap")
-
-        rows.append({
-            "expiry": expiry,
-            "lastPrice": last_price,
-            "volume": volume,
-            "vwap": vwap
-        })
-
-    df = pd.DataFrame(rows)
+    # Broadcast underlying value
+    underlying = data.get("records", {}).get("underlyingValue", None)
     if not df.empty:
-        df["expiry_dt"] = pd.to_datetime(df["expiry"], format="%d-%b-%Y")
-        df = df.sort_values("expiry_dt").reset_index(drop=True)
+        df['_underlying'] = underlying
+
+    # Keep expiry dates separate
+    expiry_dates = data.get("records", {}).get("expiryDates", [])
+    df.attrs['_expiryDates'] = expiry_dates  # store as DataFrame attribute
+
     return df
+
+# --- Index Data ---
+def nse_index():
+    url = f"{BASE_URL}/api/allIndices"
+    data = mynsefetch(url, referer=f"{BASE_URL}/market-data/live-equity-market")
+    return pd.DataFrame(data.get("data", []))
+
+# --- Futures Data (F&O) ---
+def nse_fno(symbol="NIFTY"):
+    url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
+    data = mynsefetch(url, referer=f"{BASE_URL}/market-data/live-equity-market")
+    records = data.get("records", {}).get("data", [])
+    return pd.json_normalize(records, sep="_") if records else pd.DataFrame()
+
+# --- PCR & OI Analysis ---
+def calculate_pcr(df):
+    if df.empty or 'CE_openInterest' not in df.columns or 'PE_openInterest' not in df.columns:
+        return 0, 0
+    total_ce_oi = df['CE_openInterest'].sum()
+    total_pe_oi = df['PE_openInterest'].sum()
+    pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi != 0 else 0
+    oi_diff = total_pe_oi - total_ce_oi
+    return pcr, oi_diff
+
+def max_oi_strikes(df):
+    if df.empty:
+        return None, None, None, None
+    max_call = df.loc[df['CE_openInterest'].idxmax()]['strikePrice'] if 'CE_openInterest' in df.columns else None
+    max_put = df.loc[df['PE_openInterest'].idxmax()]['strikePrice'] if 'PE_openInterest' in df.columns else None
+    max_call_chg = df.loc[df['CE_changeinOpenInterest'].idxmax()]['strikePrice'] if 'CE_changeinOpenInterest' in df.columns else None
+    max_put_chg = df.loc[df['PE_changeinOpenInterest'].idxmax()]['strikePrice'] if 'PE_changeinOpenInterest' in df.columns else None
+    return max_call, max_put, max_call_chg, max_put_chg
+
+def nearest_expiry_df(df):
+    if df.empty or '_expiryDates' not in df.attrs:
+        return df
+    nearest_expiry = df.attrs['_expiryDates'][0]
+    return df[df['expiryDate'] == nearest_expiry]
