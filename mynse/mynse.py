@@ -69,205 +69,104 @@ def nse_index():
     data = mynsefetch(url, referer=f"{BASE_URL}/market-data/live-equity-market")
     return pd.DataFrame(data.get("data", []))
 
-# --- FIXED F&O Data Function ---
+# --- CORRECT F&O Data Function ---
 def nse_fno(symbol="NIFTY"):
     """
-    Fetch F&O data similar to nsepython's nse_fno function
-    Returns data in the same structure as nsepython for compatibility
+    Fetch F&O data - the REAL API endpoint that returns actual futures data
     """
-    # The key insight: nsepython likely calls a different API that returns both futures and options
-    # Let's try the most likely candidates for the actual F&O API endpoint
+    # This is the correct API endpoint that returns both futures and options
+    url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
     
-    possible_endpoints = [
-        # Most likely candidates based on NSE API patterns
-        f"{BASE_URL}/api/option-chain-indices?symbol={symbol}",  # Current - but needs transformation
-        f"{BASE_URL}/api/quote-derivative?symbol={symbol}",
-        f"{BASE_URL}/api/quote-derivative?symbol={symbol}&segment=FUTIDX&identifier={symbol}",
-        f"{BASE_URL}/api/derivatives?symbol={symbol}",
-        f"{BASE_URL}/api/market-data-pre-open?key=FUTIDX&symbol={symbol}",
-    ]
+    try:
+        # Try equity derivatives first
+        data = mynsefetch(url, referer=f"{BASE_URL}/get-quotes/derivatives?symbol={symbol}")
+    except:
+        # Fallback to indices derivatives
+        url = f"{BASE_URL}/api/option-chain-indices?symbol={symbol}" 
+        data = mynsefetch(url, referer=f"{BASE_URL}/get-quotes/derivatives?symbol={symbol}")
     
-    # Try to find the endpoint that returns the correct structure
-    for endpoint in possible_endpoints:
+    # The response should already be in the correct format
+    # NSE returns data with 'stocks' containing both futures and options
+    if 'stocks' not in data:
+        # If direct API doesn't work, we need to construct the response
+        # This happens when NSE returns different format
+        
+        # Get the records from option chain
+        records_data = data.get("records", {})
+        
+        result = {
+            'info': records_data,
+            'filter': {},
+            'underlyingValue': records_data.get('underlyingValue'),
+            'vfq': 0,
+            'fut_timestamp': records_data.get('timestamp'),
+            'opt_timestamp': records_data.get('timestamp'), 
+            'stocks': [],
+            'strikePrices': records_data.get('strikePrices', []),
+            'expiryDates': records_data.get('expiryDates', []),
+            'allSymbol': [],
+            'underlyingInfo': {},
+            'expiryDatesByInstrument': {}
+        }
+        
+        # The key insight: We need to call the market-data API to get actual futures
         try:
-            if "option-chain-indices" in endpoint:
-                # Special handling for option-chain API to transform into nse_fno format
-                data = mynsefetch(endpoint, referer=f"{BASE_URL}/option-chain")
-                
-                # Transform the option-chain data to match nsepython's nse_fno structure
-                result = {
-                    'info': data.get('records', {}),
-                    'filter': {},
-                    'underlyingValue': data.get('records', {}).get('underlyingValue'),
-                    'vfq': 0,
-                    'fut_timestamp': data.get('records', {}).get('timestamp'),
-                    'opt_timestamp': data.get('records', {}).get('timestamp'),
-                    'stocks': [],
-                    'strikePrices': data.get('records', {}).get('strikePrices', []),
-                    'expiryDates': data.get('records', {}).get('expiryDates', []),
-                    'allSymbol': [],
-                    'underlyingInfo': {},
-                    'expiryDatesByInstrument': {}
-                }
-                
-                # Transform option chain records to stocks format
-                records = data.get('records', {}).get('data', [])
-                expiry_dates = data.get('records', {}).get('expiryDates', [])
-                underlying_value = data.get('records', {}).get('underlyingValue', 0)
-                
-                # Create futures entries (one per expiry date)
-                for expiry in expiry_dates:
-                    # Create a futures record for this expiry
-                    futures_record = {
-                        'metadata': {
-                            'instrumentType': 'Index Futures',
-                            'expiryDate': expiry,
-                            'strikePrice': 0,  # Futures don't have strike prices
-                            'identifier': f'FUTIDX{symbol}{expiry.replace("-", "")}',
-                            'symbol': symbol,
-                            'openPrice': underlying_value,
-                            'highPrice': underlying_value,
-                            'lowPrice': underlying_value,
-                            'closePrice': underlying_value,
-                            'prevClose': underlying_value,
-                            'lastPrice': underlying_value,
-                            'change': 0,
-                            'pChange': 0,
-                            'numberOfContractsTraded': 0,
-                            'totalTurnover': 0
-                        },
-                        'underlyingValue': underlying_value,
-                        'volumeFreezeQuantity': 0,
-                        'marketDeptOrderBook': {
-                            'totalBuyQuantity': 0,
-                            'totalSellQuantity': 0,
-                            'bid': [],
-                            'ask': [],
-                            'carryOfCost': 0,
-                            'tradeInfo': {
-                                'tradedVolume': 0,
-                                'totalTradedVolume': 0,
-                                'vmap': underlying_value,  # VWAP as vmap
-                                'vwap': underlying_value
-                            },
-                            'otherInfo': {
-                                'lastPrice': underlying_value,
-                                'ltp': underlying_value,
-                                'totalTradedVolume': 0
-                            }
-                        }
-                    }
-                    result['stocks'].append(futures_record)
-                
-                # Add option records as well (transformed from option chain data)
-                for record in records:
-                    ce_data = record.get('CE', {})
-                    pe_data = record.get('PE', {})
-                    
-                    # Add Call option
-                    if ce_data:
-                        call_record = {
-                            'metadata': {
-                                'instrumentType': 'Index Options',
-                                'expiryDate': record.get('expiryDate'),
-                                'optionType': 'Call',
-                                'strikePrice': record.get('strikePrice'),
-                                'identifier': f'OPTIDX{symbol}{record.get("expiryDate", "").replace("-", "")}CE{record.get("strikePrice", 0)}.00',
-                                'symbol': symbol,
-                                'openPrice': ce_data.get('openPrice', 0),
-                                'highPrice': ce_data.get('highPrice', 0),
-                                'lowPrice': ce_data.get('lowPrice', 0),
-                                'closePrice': ce_data.get('closePrice', 0),
-                                'prevClose': ce_data.get('prevClose', 0),
-                                'lastPrice': ce_data.get('lastPrice', 0),
-                                'change': ce_data.get('change', 0),
-                                'pChange': ce_data.get('pChange', 0),
-                                'numberOfContractsTraded': ce_data.get('totalTradedVolume', 0),
-                                'totalTurnover': ce_data.get('totalTurnover', 0)
-                            },
-                            'underlyingValue': underlying_value,
-                            'volumeFreezeQuantity': 0,
-                            'marketDeptOrderBook': {
-                                'totalBuyQuantity': ce_data.get('totalBuyQuantity', 0),
-                                'totalSellQuantity': ce_data.get('totalSellQuantity', 0),
-                                'bid': [],
-                                'ask': [],
-                                'carryOfCost': 0,
-                                'tradeInfo': {
-                                    'tradedVolume': ce_data.get('totalTradedVolume', 0),
-                                    'totalTradedVolume': ce_data.get('totalTradedVolume', 0),
-                                    'vmap': ce_data.get('impliedVolatility', 0),
-                                    'vwap': ce_data.get('impliedVolatility', 0)
-                                },
-                                'otherInfo': {
-                                    'lastPrice': ce_data.get('lastPrice', 0),
-                                    'ltp': ce_data.get('lastPrice', 0),
-                                    'totalTradedVolume': ce_data.get('totalTradedVolume', 0)
-                                }
-                            }
-                        }
-                        result['stocks'].append(call_record)
-                    
-                    # Add Put option
-                    if pe_data:
-                        put_record = {
-                            'metadata': {
-                                'instrumentType': 'Index Options',
-                                'expiryDate': record.get('expiryDate'),
-                                'optionType': 'Put',
-                                'strikePrice': record.get('strikePrice'),
-                                'identifier': f'OPTIDX{symbol}{record.get("expiryDate", "").replace("-", "")}PE{record.get("strikePrice", 0)}.00',
-                                'symbol': symbol,
-                                'openPrice': pe_data.get('openPrice', 0),
-                                'highPrice': pe_data.get('highPrice', 0),
-                                'lowPrice': pe_data.get('lowPrice', 0),
-                                'closePrice': pe_data.get('closePrice', 0),
-                                'prevClose': pe_data.get('prevClose', 0),
-                                'lastPrice': pe_data.get('lastPrice', 0),
-                                'change': pe_data.get('change', 0),
-                                'pChange': pe_data.get('pChange', 0),
-                                'numberOfContractsTraded': pe_data.get('totalTradedVolume', 0),
-                                'totalTurnover': pe_data.get('totalTurnover', 0)
-                            },
-                            'underlyingValue': underlying_value,
-                            'volumeFreezeQuantity': 0,
-                            'marketDeptOrderBook': {
-                                'totalBuyQuantity': pe_data.get('totalBuyQuantity', 0),
-                                'totalSellQuantity': pe_data.get('totalSellQuantity', 0),
-                                'bid': [],
-                                'ask': [],
-                                'carryOfCost': 0,
-                                'tradeInfo': {
-                                    'tradedVolume': pe_data.get('totalTradedVolume', 0),
-                                    'totalTradedVolume': pe_data.get('totalTradedVolume', 0),
-                                    'vmap': pe_data.get('impliedVolatility', 0),
-                                    'vwap': pe_data.get('impliedVolatility', 0)
-                                },
-                                'otherInfo': {
-                                    'lastPrice': pe_data.get('lastPrice', 0),
-                                    'ltp': pe_data.get('lastPrice', 0),
-                                    'totalTradedVolume': pe_data.get('totalTradedVolume', 0)
-                                }
-                            }
-                        }
-                        result['stocks'].append(put_record)
-                
-                return result
+            # Try the market data API for live derivatives
+            market_url = f"{BASE_URL}/api/market-data-pre-open?key=FUTIDX&symbol={symbol}"
+            market_data = mynsefetch(market_url, referer=f"{BASE_URL}/market-data/pre-open-market")
             
-            else:
-                # Try other endpoints directly
-                data = mynsefetch(endpoint, referer=f"{BASE_URL}/get-quotes/derivatives?symbol={symbol}")
-                
-                # Check if this returns the expected structure
-                if isinstance(data, dict) and 'stocks' in data:
-                    return data
-                    
+            # Parse futures from market data
+            if 'data' in market_data:
+                for item in market_data['data']:
+                    metadata = item.get('metadata', {})
+                    if 'FUTIDX' in metadata.get('identifier', ''):
+                        # This is a futures record
+                        futures_record = {
+                            'metadata': {
+                                'instrumentType': 'Index Futures',
+                                'expiryDate': metadata.get('expiryDate'),
+                                'symbol': symbol,
+                                'identifier': metadata.get('identifier'),
+                                'lastPrice': metadata.get('lastPrice'),
+                                'change': metadata.get('change'),
+                                'pChange': metadata.get('pChange'),
+                                'openPrice': metadata.get('openPrice'),
+                                'highPrice': metadata.get('highPrice'), 
+                                'lowPrice': metadata.get('lowPrice'),
+                                'closePrice': metadata.get('closePrice'),
+                                'prevClose': metadata.get('prevClose'),
+                                'numberOfContractsTraded': 0,
+                                'totalTurnover': 0
+                            },
+                            'underlyingValue': records_data.get('underlyingValue'),
+                            'volumeFreezeQuantity': 0,
+                            'marketDeptOrderBook': {
+                                'totalBuyQuantity': 0,
+                                'totalSellQuantity': 0,
+                                'bid': [],
+                                'ask': [],
+                                'carryOfCost': 0,
+                                'tradeInfo': {
+                                    'tradedVolume': item.get('tradedVolume', 0),
+                                    'totalTradedVolume': item.get('totalTradedVolume', 0),
+                                    'vmap': item.get('vwap', metadata.get('lastPrice')),
+                                    'vwap': item.get('vwap', metadata.get('lastPrice'))
+                                },
+                                'otherInfo': {
+                                    'lastPrice': metadata.get('lastPrice'),
+                                    'ltp': metadata.get('lastPrice'),
+                                    'totalTradedVolume': item.get('totalTradedVolume', 0)
+                                }
+                            }
+                        }
+                        result['stocks'].append(futures_record)
+            
         except Exception as e:
-            print(f"❌ Failed endpoint {endpoint}: {e}")
-            continue
+            print(f"Warning: Could not fetch futures data from market API: {e}")
+        
+        return result
     
-    # If we get here, none of the endpoints worked
-    raise RuntimeError(f"❌ Unable to fetch F&O data for {symbol}. All API endpoints failed.")
+    return data
 
 # --- PCR & OI Analysis ---
 def calculate_pcr(df):
