@@ -72,10 +72,52 @@ def nse_index():
 
 # --- Futures Data (F&O) ---
 def nse_fno(symbol="NIFTY"):
-    url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
+    """
+    Fetch Futures data for NSE indices or stocks.
+    Returns DataFrame with expiry, lastPrice, volume, vwap.
+    """
+    if symbol in ["NIFTY", "BANKNIFTY"]:
+        url = f"{BASE_URL}/api/option-chain-indices?symbol={symbol}"
+    else:
+        url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
+
     data = mynsefetch(url, referer=f"{BASE_URL}/market-data/live-equity-market")
-    records = data.get("records", {}).get("data", [])
-    return pd.json_normalize(records, sep="_") if records else pd.DataFrame()
+    futs = data.get("records", {}).get("futContracts", [])
+
+    rows = []
+    for fut in futs:
+        md  = fut.get("metadata", {})
+        mkt = fut.get("marketDeptOrderBook", {})
+        ti  = mkt.get("tradeInfo", {})
+        oi  = mkt.get("otherInfo", {})
+
+        expiry = md.get("expiryDate")
+
+        last_price = (
+            md.get("lastPrice")
+            or ti.get("lastTradedPrice")
+            or oi.get("lastPrice")
+        )
+
+        volume = (
+            ti.get("tradedVolume")
+            or oi.get("totalTradedVolume")
+        )
+
+        vwap = (
+            ti.get("vwap")
+            or ti.get("vmap")
+            or oi.get("vwap")
+        )
+
+        rows.append({
+            "expiry": expiry,
+            "lastPrice": last_price,
+            "volume": volume,
+            "vwap": vwap
+        })
+
+    return pd.DataFrame(rows)
 
 # --- PCR & OI Analysis ---
 def calculate_pcr(df):
