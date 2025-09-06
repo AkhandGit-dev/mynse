@@ -3,6 +3,7 @@ from .mynse import (
     nearest_expiry_df,
     calculate_pcr,
     max_oi_strikes,
-    nse_index,
-    nse_fno
+    nse_index
 )
+
+from .fno import nse_fno
