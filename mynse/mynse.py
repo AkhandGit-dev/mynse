@@ -72,100 +72,15 @@ def nse_index():
 # --- CORRECT F&O Data Function ---
 def nse_fno(symbol="NIFTY"):
     """
-    Fetch F&O data - the REAL API endpoint that returns actual futures data
+    Get REAL futures data - exactly what nsepython does
     """
-    # This is the correct API endpoint that returns both futures and options
-    url = f"{BASE_URL}/api/option-chain-equities?symbol={symbol}"
+    # The EXACT API endpoint nsepython uses for futures
+    url = f"{BASE_URL}/api/quote-derivative?symbol={symbol}"
     
-    try:
-        # Try equity derivatives first
-        data = mynsefetch(url, referer=f"{BASE_URL}/get-quotes/derivatives?symbol={symbol}")
-    except:
-        # Fallback to indices derivatives
-        url = f"{BASE_URL}/api/option-chain-indices?symbol={symbol}" 
-        data = mynsefetch(url, referer=f"{BASE_URL}/get-quotes/derivatives?symbol={symbol}")
+    # Call the API
+    data = mynsefetch(url, referer=f"{BASE_URL}/get-quotes/derivatives?symbol={symbol}")
     
-    # The response should already be in the correct format
-    # NSE returns data with 'stocks' containing both futures and options
-    if 'stocks' not in data:
-        # If direct API doesn't work, we need to construct the response
-        # This happens when NSE returns different format
-        
-        # Get the records from option chain
-        records_data = data.get("records", {})
-        
-        result = {
-            'info': records_data,
-            'filter': {},
-            'underlyingValue': records_data.get('underlyingValue'),
-            'vfq': 0,
-            'fut_timestamp': records_data.get('timestamp'),
-            'opt_timestamp': records_data.get('timestamp'), 
-            'stocks': [],
-            'strikePrices': records_data.get('strikePrices', []),
-            'expiryDates': records_data.get('expiryDates', []),
-            'allSymbol': [],
-            'underlyingInfo': {},
-            'expiryDatesByInstrument': {}
-        }
-        
-        # The key insight: We need to call the market-data API to get actual futures
-        try:
-            # Try the market data API for live derivatives
-            market_url = f"{BASE_URL}/api/market-data-pre-open?key=FUTIDX&symbol={symbol}"
-            market_data = mynsefetch(market_url, referer=f"{BASE_URL}/market-data/pre-open-market")
-            
-            # Parse futures from market data
-            if 'data' in market_data:
-                for item in market_data['data']:
-                    metadata = item.get('metadata', {})
-                    if 'FUTIDX' in metadata.get('identifier', ''):
-                        # This is a futures record
-                        futures_record = {
-                            'metadata': {
-                                'instrumentType': 'Index Futures',
-                                'expiryDate': metadata.get('expiryDate'),
-                                'symbol': symbol,
-                                'identifier': metadata.get('identifier'),
-                                'lastPrice': metadata.get('lastPrice'),
-                                'change': metadata.get('change'),
-                                'pChange': metadata.get('pChange'),
-                                'openPrice': metadata.get('openPrice'),
-                                'highPrice': metadata.get('highPrice'), 
-                                'lowPrice': metadata.get('lowPrice'),
-                                'closePrice': metadata.get('closePrice'),
-                                'prevClose': metadata.get('prevClose'),
-                                'numberOfContractsTraded': 0,
-                                'totalTurnover': 0
-                            },
-                            'underlyingValue': records_data.get('underlyingValue'),
-                            'volumeFreezeQuantity': 0,
-                            'marketDeptOrderBook': {
-                                'totalBuyQuantity': 0,
-                                'totalSellQuantity': 0,
-                                'bid': [],
-                                'ask': [],
-                                'carryOfCost': 0,
-                                'tradeInfo': {
-                                    'tradedVolume': item.get('tradedVolume', 0),
-                                    'totalTradedVolume': item.get('totalTradedVolume', 0),
-                                    'vmap': item.get('vwap', metadata.get('lastPrice')),
-                                    'vwap': item.get('vwap', metadata.get('lastPrice'))
-                                },
-                                'otherInfo': {
-                                    'lastPrice': metadata.get('lastPrice'),
-                                    'ltp': metadata.get('lastPrice'),
-                                    'totalTradedVolume': item.get('totalTradedVolume', 0)
-                                }
-                            }
-                        }
-                        result['stocks'].append(futures_record)
-            
-        except Exception as e:
-            print(f"Warning: Could not fetch futures data from market API: {e}")
-        
-        return result
-    
+    # Return the data as-is (should already be in correct format with 'stocks' containing futures)
     return data
 
 # --- PCR & OI Analysis ---
